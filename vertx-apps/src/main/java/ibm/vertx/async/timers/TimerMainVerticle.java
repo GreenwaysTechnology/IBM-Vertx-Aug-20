@@ -36,9 +36,9 @@ class Timer extends AbstractVerticle {
     System.out.println("start");
     delay().onSuccess(System.out::println);
     System.out.println("end");
-    heartBeat(cb -> {
-      System.out.println(cb.result());
-    });
+//    heartBeat(cb -> {
+//      System.out.println(cb.result());
+//    });
 
   }
 }
