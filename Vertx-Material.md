@@ -3257,72 +3257,883 @@ public class WebTemplateVerticle extends AbstractVerticle {
     startApplication();
   }
 }
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+Non blocking JDBC :
+
+    <dependency>
+      <groupId>io.vertx</groupId>
+      <artifactId>vertx-jdbc-client</artifactId>
+      <version>3.9.1</version>
+    </dependency>
+    <dependency>
+      <groupId>org.hsqldb</groupId>
+      <artifactId>hsqldb</artifactId>
+      <version>2.3.4</version>
+    </dependency>
+
+Steps:
+Connection
+  // Create a JDBC client with a test database
+    client = JDBCClient.createShared(vertx, new JsonObject()
+      .put("url", "jdbc:hsqldb:mem:test?shutdown=true")
+      .put("driver_class", "org.hsqldb.jdbcDriver"));
+
+Query Processing
+getConnection(handler)
+execute
+query
+
+create table,add mock data, query the initalie data
+
+package ibm.vertx.async.data.jdbc;
+
+import io.vertx.core.AbstractVerticle;
+import io.vertx.core.Handler;
+import io.vertx.core.http.HttpServerResponse;
+import io.vertx.core.json.JsonArray;
+import io.vertx.core.json.JsonObject;
+import io.vertx.example.util.Runner;
+import io.vertx.ext.jdbc.JDBCClient;
+import io.vertx.ext.sql.SQLConnection;
+import io.vertx.ext.web.Router;
+import io.vertx.ext.web.RoutingContext;
+import io.vertx.ext.web.handler.BodyHandler;
+
+public class JDBCMainVerticle extends AbstractVerticle {
+  private static String CREATE_TABLE = "CREATE TABLE IF NOT EXISTS products(id INT IDENTITY, name VARCHAR(255), price FLOAT, weight INT)";
+  private static String INITAL_TABLE_DATA = "INSERT INTO products (name, price, weight) VALUES ('Egg Whisk', 3.99, 150), ('Tea Cosy', 5.99, 100), ('Spatula', 1.00, 80)";
+  private static String GET_ALL_PRODUCTS="SELECT id, name, price, weight FROM products";
+
+  private JDBCClient client;
+
+  public static void main(String[] args) {
+    Runner.runExample(JDBCMainVerticle.class);
+  }
+
+  private void sendError(int statusCode, HttpServerResponse response) {
+    response.setStatusCode(statusCode).end();
+  }
+
+  private void handleListProducts(RoutingContext routingContext) {
+    HttpServerResponse response = routingContext.response();
+    SQLConnection conn = routingContext.get("conn");
+    conn.query(GET_ALL_PRODUCTS, query -> {
+      if (query.failed()) {
+        sendError(500, response);
+      } else {
+        JsonArray arr = new JsonArray();
+        query.result().getRows().forEach(arr::add);
+        routingContext.response().putHeader("content-type", "application/json").end(arr.encode());
+      }
+    });
+  }
+
+  public void startApplication() {
+    JsonObject jdbcConfig = new JsonObject()
+      .put("url", "jdbc:hsqldb:mem:test?shutdown=true")
+      .put("driver_class", "org.hsqldb.jdbcDriver");
+    client = JDBCClient.createShared(vertx, jdbcConfig);
+    System.out.println(client);
+
+    //setup inital data.
+    setUpInitialData(ready -> {
+      Router router = Router.router(vertx);
+
+      router.route().handler(BodyHandler.create());
+
+      // in order to minimize the nesting of call backs we can put the JDBC connection on the context for all routes
+      // that match /products
+      // this should really be encapsulated in a reusable JDBC handler that uses can just add to their app
+      router.route("/products*").handler(routingContext -> client.getConnection(res -> {
+        if (res.failed()) {
+          routingContext.fail(res.cause());
+        } else {
+          SQLConnection conn = res.result();
+
+          // save the connection on the context
+          routingContext.put("conn", conn);
+
+          // we need to return the connection back to the jdbc pool. In order to do that we need to close it, to keep
+          // the remaining code readable one can add a headers end handler to close the connection.
+          routingContext.addHeadersEndHandler(done -> conn.close(v -> {
+          }));
+
+          routingContext.next();
+        }
+      })).failureHandler(routingContext -> {
+        SQLConnection conn = routingContext.get("conn");
+        if (conn != null) {
+          conn.close(v -> {
+          });
+        }
+      });
+
+      // router.get("/products/:productID").handler(that::handleGetProduct);
+      //router.post("/products").handler(that::handleAddProduct);
+      router.get("/products").handler(this::handleListProducts);
+
+      vertx.createHttpServer().requestHandler(router).listen(8080);
+    });
+  }
+
+
+  private void setUpInitialData(Handler<Void> done) {
+    client.getConnection(res -> {
+      if (res.failed()) {
+        throw new RuntimeException(res.cause());
+      }
+
+      final SQLConnection conn = res.result();
+
+      conn.execute(CREATE_TABLE, ddl -> {
+        if (ddl.failed()) {
+          throw new RuntimeException(ddl.cause());
+        }
+
+        conn.execute(INITAL_TABLE_DATA, fixtures -> {
+          if (fixtures.failed()) {
+            throw new RuntimeException(fixtures.cause());
+          }
+          done.handle(null);
+        });
+      });
+    });
+  }
+
+  @Override
+  public void start() throws Exception {
+    super.start();
+    startApplication();
+  }
+}
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+Modularization of Web Apps:
+...........................
+
+package ibm.vertx.async.web;
+
+import io.vertx.core.AbstractVerticle;
+import io.vertx.core.http.HttpServer;
+import io.vertx.example.util.Runner;
+import io.vertx.ext.web.Router;
+
+class GreeterController extends AbstractVerticle {
+
+  public Router getGreeterRouterConfig() {
+    Router router = Router.router(vertx);
+    //rest end point happing
+    router.get("/greet").handler(routingContext -> {
+      routingContext.response().end("Greet");
+    });
+
+    return router;
+  }
+
+  @Override
+  public void start() throws Exception {
+    super.start();
+  }
+}
+
+class WelcomeController extends AbstractVerticle {
+
+  public Router getWelcomeRouterConfig() {
+    Router router = Router.router(vertx);
+    //rest end point happing
+    router.get("/sayhello").handler(routingContext -> {
+      routingContext.response().end("Hello");
+    });
+    return router;
+  }
+
+  @Override
+  public void start() throws Exception {
+    super.start();
+  }
+}
+
+class AppController extends AbstractVerticle {
+  @Override
+  public void start() throws Exception {
+    super.start();
+
+    HttpServer server = vertx.createHttpServer();
+
+    Router router = Router.router(vertx);
+    router.get("/").handler(routingContext -> {
+      routingContext.response().end("Application Controll");
+    });
+    router.mountSubRouter("/api/greeter", new GreeterController().getGreeterRouterConfig());
+    router.mountSubRouter("/api/welcome", new WelcomeController().getWelcomeRouterConfig());
+
+    server.requestHandler(router);
+
+    server.listen(3000, ar -> {
+      if (ar.succeeded()) {
+        System.out.println("Server is up");
+      }
+    });
+
+  }
+}
+
+
+public class MultController extends AbstractVerticle {
+  public static void main(String[] args) {
+    Runner.runExample(MultController.class);
+  }
+
+  @Override
+  public void start() throws Exception {
+    super.start();
+
+    vertx.deployVerticle(new WelcomeController());
+    vertx.deployVerticle(new GreeterController());
+    vertx.deployVerticle(new AppController());
+  }
+}
+
+
+Distributed Architecture: Microservices
+.......................................
+
+
+Verticle Communication:
+......................
+
+1.Within Process : 
+
+  Within single Vertx
+
+2.among Vertx
+
+
+Vertx - Clustering:
+...................
+
+Clustering , means organization application under one communication channel.
+
+Vertx uses integration/clustering technologies.
+
+Vertx uses hazelcast ClusterManager by default.
+
+Cluster : group of something - group of verticles/vertx instance/jvm
+
+in order to connect vertx apps across processes, we need cordinator 
+-Bride softwares
+
+Vertx can work with
+-hazelcast
+-apache zookeeper
+-apache ignite
+-apache Infinispan
+
+ClusterManagers
+
+by default, vertx has hazelcast
+
+
+
+How to enable clustering?
+
+In vertx clustering can be enabled in two ways
+
+1.through code
+
+Vertx Configuration;
+
+Types of vertx:
+1.standard vertx
+2.clusteredVertx
+
+Vertx.createClusteredVertx()
+
+
+2.through vertx command line
+
+  vertx program.java -cluster
+
+
+Steps for clustering:
+....................
+
+<dependency>
+      <groupId>com.hazelcast</groupId>
+      <artifactId>hazelcast</artifactId>
+      <version>3.12.2</version>
+</dependency>
+
+
+Cluster Configuration:
+
+two ways
+
+1.through code
+
+2.through configuration files
+ -hazelcast uses file  cluster.xml
+
+Create ClusteManager
+
+Config hazelcastConfig = new Config();
+
+// Now set some stuff on the config (omitted)
+
+ClusterManager mgr = new HazelcastClusterManager(hazelcastConfig);
+
+
+
+ClusterManager mgr = new HazelcastClusterManager(hazelcastConfig);
+
+    ClusterManager mgr = new HazelcastClusterManager();
+    
+    VertxOptions options = new VertxOptions().setClusterManager(mgr);
+
+    Vertx.clusteredVertx(options, vertxAsyncResult -> {
+      if (vertxAsyncResult.succeeded()) {
+
+       //deploy verticles on cluster env.
+        DeploymentOptions deploymentOptions = new DeploymentOptions();       
+        
+        vertxAsyncResult.result().deployVerticle("com.ibm.vertx.core.distributed.cluster.PublisherVerticle", deploymentOptions, res -> {
+          if (res.succeeded()) {
+            System.out.println("Deployment id is: " + res.result());
+          } else {
+            System.out.println("Deployment failed!");
+          }
+        });
+
+      } else {
+        System.out.println("Cluster up failed: " + vertxAsyncResult.cause());
+      }
+    });
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+package ibm.vert.distribute.cluster;
+
+import io.vertx.core.AbstractVerticle;
+import io.vertx.core.DeploymentOptions;
+import io.vertx.core.Vertx;
+import io.vertx.core.VertxOptions;
+import io.vertx.core.spi.cluster.ClusterManager;
+import io.vertx.spi.cluster.hazelcast.HazelcastClusterManager;
+import java.lang.management.ManagementFactory;
+import java.lang.management.RuntimeMXBean;
+
+public class PublisherVerticle extends AbstractVerticle {
+  public static void main(String[] args) {
+    ClusterManager mgr = new HazelcastClusterManager();
+    VertxOptions options = new VertxOptions().setClusterManager(mgr);
+
+    Vertx.clusteredVertx(options, vertxAsyncResult -> {
+      if (vertxAsyncResult.succeeded()) {
+
+        //deploy verticles on cluster env.
+        DeploymentOptions deploymentOptions = new DeploymentOptions();
+
+        vertxAsyncResult.result().deployVerticle("ibm.vert.distribute.cluster.PublisherVerticle", deploymentOptions, res -> {
+          if (res.succeeded()) {
+            System.out.println("Deployment id is: " + res.result());
+          } else {
+            System.out.println("Deployment failed!");
+          }
+        });
+
+      } else {
+        System.out.println("Cluster up failed: " + vertxAsyncResult.cause());
+      }
+    });
+  }
+
+  @Override
+  public void start() throws Exception {
+    super.start();
+    RuntimeMXBean runtimeBean = ManagementFactory.getRuntimeMXBean();
+    String jvmName = runtimeBean.getName();
+    // System.out.println("JVM Name = " + jvmName);
+    long pid = Long.valueOf(jvmName.split("@")[0]);
+    //System.out.println(Thread.currentThread().getName());
+    vertx.setPeriodic(5000, ar -> {
+      System.out.println("PID  = " + pid + " Thread = " + Thread.currentThread().getName());
+      //publish message
+      String news = "Last 24 hrs, 50000 covid patients in India" + " From  " + jvmName;
+      vertx.eventBus().publish("news.in.covid", news);
+    });
+  }
+}
+
+C:\session\ibm\Aug\Vertx-Training\vertx-apps\src\main\java\ibm\vert\distribute\cluster>vertx run PublisherVerticle.java -cluster
+
+
+
+package ibm.vert.distribute.cluster;
+
+import java.lang.management.ManagementFactory;
+import java.lang.management.RuntimeMXBean;
+import io.vertx.core.AbstractVerticle;
+import io.vertx.core.DeploymentOptions;
+import io.vertx.core.Vertx;
+import io.vertx.core.VertxOptions;
+import io.vertx.core.eventbus.EventBus;
+import io.vertx.core.eventbus.MessageConsumer;
+import io.vertx.core.spi.cluster.ClusterManager;
+import io.vertx.spi.cluster.hazelcast.HazelcastClusterManager;
+
+public class SubscriberVerticle extends AbstractVerticle {
+
+  public static void main(String[] args) {
+    ClusterManager mgr = new HazelcastClusterManager();
+
+    VertxOptions options = new VertxOptions().setClusterManager(mgr);
+
+    Vertx.clusteredVertx(options, cluster -> {
+      if (cluster.succeeded()) {
+        DeploymentOptions deploymentOptions = new DeploymentOptions();
+        cluster.result().deployVerticle("ibm.vert.distribute.cluster.SubscriberVerticle", deploymentOptions, res -> {
+          if (res.succeeded()) {
+            System.out.println("Deployment id is: " + res.result());
+          } else {
+            System.out.println("Deployment failed!");
+          }
+        });
+      } else {
+        System.out.println("Cluster up failed: " + cluster.cause());
+      }
+    });
+  }
+
+  private void consumeNews() {
+    EventBus eventBus = vertx.eventBus();
+    //Declare Consumer
+    MessageConsumer<String> consumer = eventBus.consumer("news.in.covid");
+    //handle/process the message/news
+    consumer.handler(news -> {
+      RuntimeMXBean runtimeBean = ManagementFactory.getRuntimeMXBean();
+      String jvmName = runtimeBean.getName();
+      System.out.println("JVM Name = " + jvmName);
+      long pid = Long.valueOf(jvmName.split("@")[0]);
+      System.out.println("PID  = " + pid + " Thread = " + Thread.currentThread().getName());
+      System.out.println("News 7's Today News : " + news.body());
+    });
+
+  }
+
+  @Override
+  public void start() throws Exception {
+    super.start();
+    consumeNews();
+  }
+}
+C:\session\ibm\Aug\Vertx-Training\vertx-apps\src\main\java\ibm\vert\distribute\cluster>vertx run SubscriberVerticle.java -cluster
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+Load balancing and fail over: Scalability
+.................................................................................
+
+what if the one verticle which was deployed down , due to various reasons.
+
+
+You set no of instances of same the verticle .
+
+Via Code
+
+DeploymentOptions deploymentOptions = new DeploymentOptions().setInstances(5);
+
+Note: No of instances can be set in cluster and non cluster mode
+
+
+via commandline
+
+vertx programname -cluster -instances=5
+
+//ha - cluster + loadbalancing
+vertx programname -ha -instances=5 
+
+C:\session\ibm\Aug\Vertx-Training\vertx-apps\src\main\java\ibm\vert\distribute\cluster>vertx run SubscriberVerticle.java -ha -instances=5
+
+
+package ibm.vert.distribute.cluster;
+
+import io.vertx.core.AbstractVerticle;
+import io.vertx.core.http.HttpServer;
+
+public class HighAvailbilityApp extends AbstractVerticle {
+
+  @Override
+  public void start() {
+
+    HttpServer server = vertx.createHttpServer();
+
+    server.requestHandler(req -> {
+      long id = Thread.currentThread().getId();
+      req.response().end("<h1> I am coming from " + id + " Instance");
+    });
+
+    server.listen(8888, "localhost", handler -> {
+      if (handler.succeeded()) {
+        System.out.println("Server is Ready! " + Thread.currentThread().getId());
+      } else {
+        System.out.println("Server failed to Start");
+      }
+    });
+  }
+
+A quorum has been obtained:
+  
+  It is algorthim used by built in load balancer.
+
+vertx run HighAvailbilityApp.java -ha -instances=5
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+Distributed Configuration:
+.........................
+Vert.x Config:
+Configuration Stores(Storage):
+..............................
+
+Physical storage:
+
+1.files
+2.directories -ldap....
+3.HTTP Servers - a separate HTTP server.
+4.Redis
+5.System Properties
+6.environment properties
+
+In memory Store: Application memory
+
+Configuration via JSON objects, can be kept at memory.
+
+Storage file formats:
+1.yaml
+2.json
+3.properties
+......
+
+
+Vertx Provides non blocking Object
+
+1.ConfigRetriever:
+
+  It configures a set of configuration store, where Configuration store defines  a location
+from where the configuration data is read and also format(JSON by default).
+
+ The Result from ConfigServer is JSON object.
+
+Flow
+
+  Application ------------------|ConfigRetriver----|ConfigStore
+				JSON Object	<----	
+
+
+How to instantiate the ConfigRetriver:
+
+ ConfigRetriver retriver = ConfigRetriver.create(vertx).
+
+
+
+///////////////////////////////////////////////////////////////////////////////////////////
+
+ConfigRetiver Object can be used to read from physical storage and also in memory.
+
+AbstractVerticle has an api called
+
+public JsonObject config()
+Get the configuration of the verticle.
+This can be specified when the verticle is deployed.
+
+JSONObject config(); --this method interanally uses Builtin ConfigRetriver.
+
+ get("key","defaultValue") - to read values from the memory
+   get("message","Hello")
+ put("key",value) - to store configuration data to verticles /application
+
+/////////////////////////////////////////////////////////////////////////////////////////
+
+/////////////////////////////////////////////////////////////////////////////////////////
+
+/////////////////////////////////////////////////////////////////////////////////////////
+Order of config property retrival:
+
+get("SOMETHING")------> Verticle---Not----System Proptiers---->Env--->Store
+
+1.The vertx Verticle config()
+2.The system properties
+3.The environment variables
+4.From the store what you have configurated
+/////////////////////////////////////////////////////////////////////////////////////////
+
+package ibm.vertx.async.config;
+
+import io.vertx.config.ConfigRetriever;
+import io.vertx.config.ConfigRetrieverOptions;
+import io.vertx.config.ConfigStoreOptions;
+import io.vertx.core.AbstractVerticle;
+import io.vertx.core.json.JsonObject;
+import io.vertx.example.util.Runner;
+
+public class ConfigVerticle extends AbstractVerticle {
+  public static void main(String[] args) {
+    Runner.runExample(ConfigVerticle.class);
+  }
+
+  public void configViaConfigReteriver() {
+    //Add Storage options: type, format,file path
+    ConfigStoreOptions options = new ConfigStoreOptions();
+    options.setType("file");
+    options.setFormat("json");
+    //file path
+    options.setConfig(new JsonObject().put("path", "conf/config.json"));
+    ConfigRetriever retriever = ConfigRetriever.create(vertx,
+      new ConfigRetrieverOptions().addStore(options));
+    //read config
+    retriever.getConfig(config -> {
+      if (config.succeeded()) {
+        System.out.println("Config is Ready");
+        //System.out.println(config.result());
+        JsonObject configRes = config.result();
+        System.out.println(configRes.getString("message"));
+
+      } else {
+        System.out.println("Config Error : " + config.cause());
+      }
+    });
+
+  }
+
+  public void configViaAbstractVerticle() {
+    JsonObject jsonConfig = config();
+    String message = jsonConfig.getString("message","defaultMessage");
+    System.out.println(message);
+  }
+
+
+  @Override
+  public void start() throws Exception {
+    super.start();
+    configViaAbstractVerticle();
+  }
+}
+
+>java  -jar target/vertx-apps-1.0.0-SNAPSHOT-fat.jar -conf src/main/resources/conf/config.json
+>vertx run program.java --conf src/main/resources/conf/config.json
+
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+
+Service Discovery and Registry:
+...............................
+
+Lookup server and naming server.
+
+Data Base server which stores 'resources' :  web site address : dns server
+
+Same concept is used in distributed programming/microservices:
+-> RMI, EJB,DCOM
+
+
+Object commuication in distributed env:
+.........................................
+
+1.Object need to know the object address
+2.where objects are inside process
+3.where process are inside os
+4.where os connected via network interfaces
 
 
 
 
+Registry Server:
+ It is key-value pair database, Where you can store "lookup" able resources.
+
+In Vertx you can store the following resources
+
+Types of Resources(Services):
+.............................
+The services you can register into registry
+
+HTTP Endpoint -HttpEndPoint.createRecord
+Event Bus Service -EventBus.createRecord
+Message Source
+JDBC Data Source
+Redis Data Source
+MongoDb Data Source
+
+
+Popular Registry Servers:
+.........................
+
+1.eureka server
+
+2.Apache zoo keeper
+
+3.Consule
+
+4.Kubernetes
+
+5.Redis
+etc....
+
+
+                      Verticles
+					              |
+
+				   ServiceDiscovery Instance -Registre and lookup
+                                           |
+
+					                  Bridge --Provided by Vertx
+                                         --------
+					                                  |
+                                   Registry Server -Apache Zooker
 
 
 
+/////////////////////////////////////////////////////////////////////////////////////////////
+
+Setup :
+
+1.download registry server from https://zookeeper.apache.org/doc/current/zookeeperStarted.html#sc_Download
+
+2.extract tar/zip file where ever the location
+
+3.create conf/zoo.cfg  from conf/zoo_sample.cfg(by copy and paste)
+
+4.Add the below entries
+
+conf/zoo.cfg
+tickTime=2000
+dataDir=/var/lib/zookeeper
+clientPort=2181
+
+5.start zoo keeper server
+  go to bin/ folder and excute zkServer.command /sh file
 
 
+Vertx uses on Object --Record Which is like "Bag" which has resource information..
+
+ Resource--->Record 
+
+Service Discovery Objects:
+
+1.Record
+2.Service
+3.ServiceDiscovery
+
+Vertx has ServiceDiscover Instance, which helps to publish / un publish ,and discover
+services 
 
 
+ Resource--->Record  ----| Discovery.publish(record)-----ZooKeeper
+
+Operations:
+
+1.Create Record
+2.Wrap Resources into record
+3.Publish Record into Registry Server
+
+4.1.Loopkup services via Discovery
+4.2. Get Service instance
+4.3.Use that Service instance
+
+5.Unpublish the record from Registry Server.
 
 
+Syntax:
+
+Record httpRecord = HttpEndPoint.createRecord("name-of-service","host",port,"api",meta information-new Json());
+
+discovery.publish(httpRecord,callback)
+
+consume
+discovery.getRecord(new JsonObject().put("name","name-of-service",callback))
 
 
+package ibm.vert.distribute.servicediscovery;
+
+import io.vertx.core.AbstractVerticle;
+import io.vertx.core.json.JsonObject;
+import io.vertx.example.util.Runner;
+import io.vertx.ext.web.client.WebClient;
+import io.vertx.servicediscovery.Record;
+import io.vertx.servicediscovery.ServiceDiscovery;
+import io.vertx.servicediscovery.ServiceDiscoveryOptions;
+import io.vertx.servicediscovery.types.HttpEndpoint;
+
+public class ServiceDiscoverVerticle extends AbstractVerticle {
+  public static void main(String[] args) {
+    Runner.runExample(ServiceDiscoverVerticle.class);
+  }
+
+  public void process() {
+    //ServiceDiscovery Options which helps configure zoo keeper information
+    ServiceDiscoveryOptions discoveryOptions = new ServiceDiscoveryOptions();
+    //enable discovery server : apache zoo keeper
+    discoveryOptions.setBackendConfiguration(new JsonObject()
+      .put("connection", "127.0.0.1:2181")
+      .put("ephemeral", true)
+      .put("guaranteed", true)
+      .put("basePath", "/services/my-backend")
+    );
+    //Service Discovery Instance creation which helps publish , discover and unpublish
+    ServiceDiscovery discovery = ServiceDiscovery.create(vertx, discoveryOptions);
+//Create Record
+    Record httpEndPointRecord = HttpEndpoint
+      .createRecord("http-posts-service",
+        true, "jsonplaceholder.typicode.com", 443, "/posts", new JsonObject());
+    //publish HttpEndpoint
+    discovery.publish(httpEndPointRecord, ar -> {
+      if (ar.succeeded()) {
+        System.out.println("Successfully published to Zookeeper...>>>>" + ar.result().toJson());
+      } else {
+        System.out.println(" Not Published " + ar.cause());
+      }
+    });
+
+    //Reterive the Service
+    vertx.setTimer(2000, ar -> {
+      //Get The Service Instance from the Service
+      HttpEndpoint.getWebClient(discovery, new JsonObject().put("name", "http-posts-service"), sar -> {
+        WebClient client = sar.result();
+        client.get("/posts").send(res -> {
+          System.out.println("Response is ready!");
+          System.out.println(res.result().bodyAsJsonArray().encodePrettily());
+          //remove /release discovery record
+          ServiceDiscovery.releaseServiceObject(discovery, client);
+        });
+
+      });
+
+    });
 
 
+  }
 
+  @Override
+  public void start() throws Exception {
+    super.start();
+    process();
+  }
+}
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+Docker:
+# Extend vert.x image
+FROM vertx/vertx3
+#                                                       (1)
+ENV VERTICLE_NAME ibm.vertx.containers.HelloVerticle
+ENV VERTICLE_FILE target/vertx-apps-1.0.0-SNAPSHOT.jar
 
+# Set the location of the verticles
+ENV VERTICLE_HOME /usr/verticles
 
+EXPOSE 8080
 
+# Copy your verticle to the container                   (2)
+COPY $VERTICLE_FILE $VERTICLE_HOME/
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-Vert.x Config provides a way to configure your Vert.x application.
-
-offers multiple configuration syntaxes (json, properties, yaml (extension), hocon (extension)…​
-
-offers multiple configuration stores (files, directories, http, git (extension), redis (extension), system properties, environment properties)…​
-
-lets you define the processing order and overloading
-
-supports runtime reconfiguration
-
-The library is structured around:
-
-a Config Retriever instantiated and used by the Vert.x application. It configures a set of configuration store
-
-Configuration store defines a location from where the configuration data is read and and a syntax (json by default)
-
-The configuration is retrieved as a JSON Object
-
->java  -jar target/vertx-apps-1.0.0-SNAPSHOT-fat.jar -conf
-src/main/resources/conf/config.json
-
-
-
-
-
-
-
-
-
-
+# Launch the verticle
+WORKDIR $VERTICLE_HOME
+ENTRYPOINT ["sh", "-c"]
+CMD ["exec vertx run $VERTICLE_NAME -cp $VERTICLE_HOME/*"]
 
 
 

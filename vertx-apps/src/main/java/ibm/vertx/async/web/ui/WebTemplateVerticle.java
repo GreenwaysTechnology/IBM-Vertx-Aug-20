@@ -70,7 +70,8 @@ public class WebTemplateVerticle extends AbstractVerticle {
 
     // Create a new document on mongo.
     router.post("/users").handler(ctx -> {
-      // since jquery is sending data in multipart-form format to avoid preflight calls, we need to convert it to JSON.
+      // since jquery is sending data in multipart-form format to avoid preflight calls,
+      // we need to convert it to JSON.
       JsonObject user = new JsonObject()
         .put("username", ctx.request().getFormAttribute("username"))
         .put("email", ctx.request().getFormAttribute("email"))
